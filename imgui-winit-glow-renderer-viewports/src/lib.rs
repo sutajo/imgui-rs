@@ -226,12 +226,20 @@ struct GlStateBackup {
     blend_func_dst: i32,
     scissor_enabled: bool,
     scissor: [i32; 4],
-    vao: i32,
-    vbo: i32,
-    ibo: i32,
-    active_texture: i32,
-    texture: i32,
-    program: i32,
+    vao: u32,
+    vbo: u32,
+    ibo: u32,
+    active_texture: u32,
+    texture: u32,
+    program: u32,
+}
+
+fn to_native_gl<T>(handle: u32, constructor: fn(NonZeroU32) -> T) -> Option<T> {
+    if handle != 0 {
+        Some(constructor(NonZeroU32::new(handle).unwrap()))
+    } else {
+        None
+    }
 }
 
 impl GlStateBackup {
@@ -248,15 +256,15 @@ impl GlStateBackup {
             let mut scissor = [0; 4];
             context.get_parameter_i32_slice(glow::SCISSOR_BOX, &mut scissor);
 
-            let vao = context.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
-            let vbo = context.get_parameter_i32(glow::ARRAY_BUFFER_BINDING);
-            let ibo = context.get_parameter_i32(glow::ELEMENT_ARRAY_BUFFER_BINDING);
+            let vao = context.get_parameter_i32(glow::VERTEX_ARRAY_BINDING) as _;
+            let vbo = context.get_parameter_i32(glow::ARRAY_BUFFER_BINDING) as _;
+            let ibo = context.get_parameter_i32(glow::ELEMENT_ARRAY_BUFFER_BINDING) as _;
 
-            let active_texture = context.get_parameter_i32(glow::ACTIVE_TEXTURE);
+            let active_texture = context.get_parameter_i32(glow::ACTIVE_TEXTURE) as _;
             context.active_texture(0);
-            let texture = context.get_parameter_i32(glow::TEXTURE_BINDING_2D);
+            let texture = context.get_parameter_i32(glow::TEXTURE_BINDING_2D) as _;
 
-            let program = context.get_parameter_i32(glow::CURRENT_PROGRAM);
+            let program = context.get_parameter_i32(glow::CURRENT_PROGRAM) as _;
 
             Self {
                 viewport,
@@ -295,41 +303,24 @@ impl GlStateBackup {
                 self.scissor[3],
             );
 
-            if self.vao != 0 {
-                let vao = std::mem::transmute(self.vao);
-                context.bind_vertex_array(Some(vao));
-            } else {
-                context.bind_vertex_array(None);
-            }
+            context.bind_vertex_array(to_native_gl(self.vao, glow::NativeVertexArray));
 
-            if self.vbo != 0 {
-                let vbo = std::mem::transmute(self.vbo);
-                context.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-            } else {
-                context.bind_buffer(glow::ARRAY_BUFFER, None);
-            }
+            context.bind_buffer(
+                glow::ARRAY_BUFFER,
+                to_native_gl(self.vbo, glow::NativeBuffer),
+            );
+            context.bind_buffer(
+                glow::ELEMENT_ARRAY_BUFFER,
+                to_native_gl(self.ibo, glow::NativeBuffer),
+            );
 
-            if self.ibo != 0 {
-                let ibo = std::mem::transmute(self.ibo);
-                context.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ibo));
-            } else {
-                context.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, None);
-            }
+            context.bind_texture(
+                glow::TEXTURE_2D,
+                to_native_gl(self.texture, glow::NativeTexture),
+            );
+            context.active_texture(self.active_texture);
 
-            if self.texture != 0 {
-                let texture = std::mem::transmute(self.texture);
-                context.bind_texture(glow::TEXTURE_2D, Some(texture));
-            } else {
-                context.bind_texture(glow::TEXTURE_2D, None);
-            }
-            context.active_texture(self.active_texture as _);
-
-            if self.program != 0 {
-                let program = std::mem::transmute(self.program);
-                context.use_program(Some(program));
-            } else {
-                context.use_program(None);
-            }
+            context.use_program(to_native_gl(self.program, glow::NativeProgram));
         }
     }
 
@@ -506,13 +497,24 @@ impl Renderer {
                         input:
                             KeyboardInput {
                                 virtual_keycode: Some(key),
-                                state: ElementState::Pressed,
+                                state,
                                 ..
                             },
                         ..
                     } => {
+                        let pressed = state == ElementState::Pressed;
+
+                        // We map both left and right ctrl to `ModCtrl`, etc.
+                        // imgui is told both "left control is pressed" and
+                        // "consider the control key is pressed". Allows
+                        // applications to use either general "ctrl" or a
+                        // specific key. Same applies to other modifiers.
+                        // https://github.com/ocornut/imgui/issues/5047
+                        handle_key_modifier(imgui.io_mut(), key, pressed);
+
+                        // Add main key event
                         if let Some(key) = to_imgui_key(key) {
-                            imgui.io_mut().add_key_event(key, true);
+                            imgui.io_mut().add_key_event(key, pressed);
                         }
                     }
                     winit::event::WindowEvent::ModifiersChanged(modifiers) => {
@@ -907,6 +909,18 @@ struct ViewportData {
 
 struct PlatformBackend {
     event_queue: Rc<RefCell<VecDeque<ViewportEvent>>>,
+}
+
+fn handle_key_modifier(io: &mut imgui::Io, key: VirtualKeyCode, down: bool) {
+    if key == VirtualKeyCode::LShift || key == VirtualKeyCode::RShift {
+        io.add_key_event(imgui::Key::ModShift, down);
+    } else if key == VirtualKeyCode::LControl || key == VirtualKeyCode::RControl {
+        io.add_key_event(imgui::Key::ModCtrl, down);
+    } else if key == VirtualKeyCode::LAlt || key == VirtualKeyCode::RAlt {
+        io.add_key_event(imgui::Key::ModAlt, down);
+    } else if key == VirtualKeyCode::LWin || key == VirtualKeyCode::RWin {
+        io.add_key_event(imgui::Key::ModSuper, down);
+    }
 }
 
 impl imgui::PlatformViewportBackend for PlatformBackend {
